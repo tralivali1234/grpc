@@ -1,53 +1,37 @@
 /*
  *
- * Copyright 2015-2016, Google Inc.
- * All rights reserved.
+ * Copyright 2015-2016 gRPC authors.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *     * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
- *     * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  *
  */
 
-#include <unistd.h>
 #include <cinttypes>
 #include <fstream>
 #include <memory>
 
-#include <grpc++/channel.h>
-#include <grpc++/client_context.h>
-#include <grpc++/security/credentials.h>
 #include <grpc/grpc.h>
 #include <grpc/support/alloc.h>
 #include <grpc/support/log.h>
 #include <grpc/support/string_util.h>
-#include <grpc/support/useful.h>
+#include <grpc/support/time.h>
+#include <grpcpp/channel.h>
+#include <grpcpp/client_context.h>
+#include <grpcpp/security/credentials.h>
 
 #include "src/core/lib/transport/byte_stream.h"
-#include "src/proto/grpc/testing/empty.grpc.pb.h"
-#include "src/proto/grpc/testing/messages.grpc.pb.h"
+#include "src/proto/grpc/testing/empty.pb.h"
+#include "src/proto/grpc/testing/messages.pb.h"
 #include "src/proto/grpc/testing/test.grpc.pb.h"
 #include "test/cpp/interop/client_helper.h"
 #include "test/cpp/interop/interop_client.h"
@@ -109,7 +93,10 @@ TestService::Stub* InteropClient::ServiceStub::Get() {
 
 UnimplementedService::Stub*
 InteropClient::ServiceStub::GetUnimplementedServiceStub() {
-  return UnimplementedService::NewStub(channel_).get();
+  if (unimplemented_service_stub_ == nullptr) {
+    unimplemented_service_stub_ = UnimplementedService::NewStub(channel_);
+  }
+  return unimplemented_service_stub_.get();
 }
 
 void InteropClient::ServiceStub::Reset(std::shared_ptr<Channel> channel) {
@@ -134,7 +121,8 @@ InteropClient::InteropClient(std::shared_ptr<Channel> channel,
     : serviceStub_(channel, new_stub_every_test_case),
       do_not_abort_on_transient_failures_(do_not_abort_on_transient_failures) {}
 
-bool InteropClient::AssertStatusOk(const Status& s) {
+bool InteropClient::AssertStatusOk(const Status& s,
+                                   const grpc::string& optional_debug_string) {
   if (s.ok()) {
     return true;
   }
@@ -143,17 +131,21 @@ bool InteropClient::AssertStatusOk(const Status& s) {
   // already checked for s.ok() above). So, the following will call abort()
   // (unless s.error_code() corresponds to a transient failure and
   // 'do_not_abort_on_transient_failures' is true)
-  return AssertStatusCode(s, StatusCode::OK);
+  return AssertStatusCode(s, StatusCode::OK, optional_debug_string);
 }
 
-bool InteropClient::AssertStatusCode(const Status& s,
-                                     StatusCode expected_code) {
+bool InteropClient::AssertStatusCode(
+    const Status& s, StatusCode expected_code,
+    const grpc::string& optional_debug_string) {
   if (s.error_code() == expected_code) {
     return true;
   }
 
-  gpr_log(GPR_ERROR, "Error status code: %d (expected: %d), message: %s",
-          s.error_code(), expected_code, s.error_message().c_str());
+  gpr_log(GPR_ERROR,
+          "Error status code: %d (expected: %d), message: %s,"
+          " debug string: %s",
+          s.error_code(), expected_code, s.error_message().c_str(),
+          optional_debug_string.c_str());
 
   // In case of transient transient/retryable failures (like a broken
   // connection) we may or may not abort (see TransientFailureOrAbort())
@@ -173,7 +165,7 @@ bool InteropClient::DoEmpty() {
 
   Status s = serviceStub_.Get()->EmptyCall(&context, request, &response);
 
-  if (!AssertStatusOk(s)) {
+  if (!AssertStatusOk(s, context.debug_error_string())) {
     return false;
   }
 
@@ -203,7 +195,7 @@ bool InteropClient::PerformLargeUnary(SimpleRequest* request,
   }
 
   Status s = serviceStub_.Get()->UnaryCall(&context, *request, response);
-  if (!AssertStatusOk(s)) {
+  if (!AssertStatusOk(s, context.debug_error_string())) {
     return false;
   }
 
@@ -253,7 +245,7 @@ bool InteropClient::DoOauth2AuthToken(const grpc::string& username,
 
   Status s = serviceStub_.Get()->UnaryCall(&context, request, &response);
 
-  if (!AssertStatusOk(s)) {
+  if (!AssertStatusOk(s, context.debug_error_string())) {
     return false;
   }
 
@@ -281,7 +273,7 @@ bool InteropClient::DoPerRpcCreds(const grpc::string& json_key) {
 
   Status s = serviceStub_.Get()->UnaryCall(&context, request, &response);
 
-  if (!AssertStatusOk(s)) {
+  if (!AssertStatusOk(s, context.debug_error_string())) {
     return false;
   }
 
@@ -424,7 +416,7 @@ bool InteropClient::DoRequestStreaming() {
   GPR_ASSERT(stream->WritesDone());
 
   Status s = stream->Finish();
-  if (!AssertStatusOk(s)) {
+  if (!AssertStatusOk(s, context.debug_error_string())) {
     return false;
   }
 
@@ -463,7 +455,7 @@ bool InteropClient::DoResponseStreaming() {
   }
 
   Status s = stream->Finish();
-  if (!AssertStatusOk(s)) {
+  if (!AssertStatusOk(s, context.debug_error_string())) {
     return false;
   }
 
@@ -528,7 +520,7 @@ bool InteropClient::DoClientCompressedStreaming() {
   GPR_ASSERT(stream->WritesDone());
 
   s = stream->Finish();
-  if (!AssertStatusOk(s)) {
+  if (!AssertStatusOk(s, context.debug_error_string())) {
     return false;
   }
 
@@ -590,7 +582,7 @@ bool InteropClient::DoServerCompressedStreaming() {
   }
 
   Status s = stream->Finish();
-  if (!AssertStatusOk(s)) {
+  if (!AssertStatusOk(s, context.debug_error_string())) {
     return false;
   }
   return true;
@@ -615,7 +607,9 @@ bool InteropClient::DoResponseStreamingWithSlowConsumer() {
     GPR_ASSERT(response.payload().body() ==
                grpc::string(kResponseMessageSize, '\0'));
     gpr_log(GPR_DEBUG, "received message %d", i);
-    usleep(kReceiveDelayMilliSeconds * 1000);
+    gpr_sleep_until(gpr_time_add(
+        gpr_now(GPR_CLOCK_REALTIME),
+        gpr_time_from_millis(kReceiveDelayMilliSeconds, GPR_TIMESPAN)));
     ++i;
   }
 
@@ -629,7 +623,7 @@ bool InteropClient::DoResponseStreamingWithSlowConsumer() {
   }
 
   Status s = stream->Finish();
-  if (!AssertStatusOk(s)) {
+  if (!AssertStatusOk(s, context.debug_error_string())) {
     return false;
   }
 
@@ -676,7 +670,7 @@ bool InteropClient::DoHalfDuplex() {
   }
 
   Status s = stream->Finish();
-  if (!AssertStatusOk(s)) {
+  if (!AssertStatusOk(s, context.debug_error_string())) {
     return false;
   }
 
@@ -720,7 +714,7 @@ bool InteropClient::DoPingPong() {
   GPR_ASSERT(!stream->Read(&response));
 
   Status s = stream->Finish();
-  if (!AssertStatusOk(s)) {
+  if (!AssertStatusOk(s, context.debug_error_string())) {
     return false;
   }
 
@@ -742,7 +736,8 @@ bool InteropClient::DoCancelAfterBegin() {
   context.TryCancel();
   Status s = stream->Finish();
 
-  if (!AssertStatusCode(s, StatusCode::CANCELLED)) {
+  if (!AssertStatusCode(s, StatusCode::CANCELLED,
+                        context.debug_error_string())) {
     return false;
   }
 
@@ -800,7 +795,8 @@ bool InteropClient::DoTimeoutOnSleepingServer() {
   stream->Write(request);
 
   Status s = stream->Finish();
-  if (!AssertStatusCode(s, StatusCode::DEADLINE_EXCEEDED)) {
+  if (!AssertStatusCode(s, StatusCode::DEADLINE_EXCEEDED,
+                        context.debug_error_string())) {
     return false;
   }
 
@@ -820,7 +816,7 @@ bool InteropClient::DoEmptyStream() {
   GPR_ASSERT(stream->Read(&response) == false);
 
   Status s = stream->Finish();
-  if (!AssertStatusOk(s)) {
+  if (!AssertStatusOk(s, context.debug_error_string())) {
     return false;
   }
 
@@ -843,7 +839,8 @@ bool InteropClient::DoStatusWithMessage() {
   requested_status->set_code(test_code);
   requested_status->set_message(test_msg);
   Status s = serviceStub_.Get()->UnaryCall(&context, request, &response);
-  if (!AssertStatusCode(s, grpc::StatusCode::UNKNOWN)) {
+  if (!AssertStatusCode(s, grpc::StatusCode::UNKNOWN,
+                        context.debug_error_string())) {
     return false;
   }
   GPR_ASSERT(s.error_message() == test_msg);
@@ -863,7 +860,8 @@ bool InteropClient::DoStatusWithMessage() {
   while (stream->Read(&streaming_response))
     ;
   s = stream->Finish();
-  if (!AssertStatusCode(s, grpc::StatusCode::UNKNOWN)) {
+  if (!AssertStatusCode(s, grpc::StatusCode::UNKNOWN,
+                        context.debug_error_string())) {
     return false;
   }
   GPR_ASSERT(s.error_message() == test_msg);
@@ -877,7 +875,8 @@ bool InteropClient::DoCacheableUnary() {
 
   // Create request with current timestamp
   gpr_timespec ts = gpr_now(GPR_CLOCK_PRECISE);
-  std::string timestamp = std::to_string((long long unsigned)ts.tv_nsec);
+  std::string timestamp =
+      std::to_string(static_cast<long long unsigned>(ts.tv_nsec));
   SimpleRequest request;
   request.mutable_payload()->set_body(timestamp.c_str(), timestamp.size());
 
@@ -890,7 +889,7 @@ bool InteropClient::DoCacheableUnary() {
   context1.AddMetadata("x-user-ip", "1.2.3.4");
   Status s1 =
       serviceStub_.Get()->CacheableUnaryCall(&context1, request, &response1);
-  if (!AssertStatusOk(s1)) {
+  if (!AssertStatusOk(s1, context1.debug_error_string())) {
     return false;
   }
   gpr_log(GPR_DEBUG, "response 1 payload: %s",
@@ -903,7 +902,7 @@ bool InteropClient::DoCacheableUnary() {
   context2.AddMetadata("x-user-ip", "1.2.3.4");
   Status s2 =
       serviceStub_.Get()->CacheableUnaryCall(&context2, request, &response2);
-  if (!AssertStatusOk(s2)) {
+  if (!AssertStatusOk(s2, context2.debug_error_string())) {
     return false;
   }
   gpr_log(GPR_DEBUG, "response 2 payload: %s",
@@ -913,6 +912,26 @@ bool InteropClient::DoCacheableUnary() {
   // second response is a cached copy of the first response
   GPR_ASSERT(response2.payload().body() == response1.payload().body());
 
+  // Request 3
+  // Modify the request body so it will not get a cache hit
+  ts = gpr_now(GPR_CLOCK_PRECISE);
+  timestamp = std::to_string(static_cast<long long unsigned>(ts.tv_nsec));
+  SimpleRequest request1;
+  request1.mutable_payload()->set_body(timestamp.c_str(), timestamp.size());
+  ClientContext context3;
+  SimpleResponse response3;
+  context3.set_cacheable(true);
+  context3.AddMetadata("x-user-ip", "1.2.3.4");
+  Status s3 =
+      serviceStub_.Get()->CacheableUnaryCall(&context3, request1, &response3);
+  if (!AssertStatusOk(s3, context3.debug_error_string())) {
+    return false;
+  }
+  gpr_log(GPR_DEBUG, "response 3 payload: %s",
+          response3.payload().body().c_str());
+
+  // Check that the response is different from the previous response.
+  GPR_ASSERT(response3.payload().body() != response1.payload().body());
   return true;
 }
 
@@ -936,14 +955,14 @@ bool InteropClient::DoCustomMetadata() {
     request.mutable_payload()->set_body(payload.c_str(), kLargeRequestSize);
 
     Status s = serviceStub_.Get()->UnaryCall(&context, request, &response);
-    if (!AssertStatusOk(s)) {
+    if (!AssertStatusOk(s, context.debug_error_string())) {
       return false;
     }
 
     const auto& server_initial_metadata = context.GetServerInitialMetadata();
     auto iter = server_initial_metadata.find(kEchoInitialMetadataKey);
     GPR_ASSERT(iter != server_initial_metadata.end());
-    GPR_ASSERT(iter->second.data() == kInitialMetadataValue);
+    GPR_ASSERT(iter->second == kInitialMetadataValue);
     const auto& server_trailing_metadata = context.GetServerTrailingMetadata();
     iter = server_trailing_metadata.find(kEchoTrailingBinMetadataKey);
     GPR_ASSERT(iter != server_trailing_metadata.end());
@@ -987,14 +1006,14 @@ bool InteropClient::DoCustomMetadata() {
     GPR_ASSERT(!stream->Read(&response));
 
     Status s = stream->Finish();
-    if (!AssertStatusOk(s)) {
+    if (!AssertStatusOk(s, context.debug_error_string())) {
       return false;
     }
 
     const auto& server_initial_metadata = context.GetServerInitialMetadata();
     auto iter = server_initial_metadata.find(kEchoInitialMetadataKey);
     GPR_ASSERT(iter != server_initial_metadata.end());
-    GPR_ASSERT(iter->second.data() == kInitialMetadataValue);
+    GPR_ASSERT(iter->second == kInitialMetadataValue);
     const auto& server_trailing_metadata = context.GetServerTrailingMetadata();
     iter = server_trailing_metadata.find(kEchoTrailingBinMetadataKey);
     GPR_ASSERT(iter != server_trailing_metadata.end());
@@ -1018,7 +1037,8 @@ bool InteropClient::DoUnimplementedService() {
 
   Status s = stub->UnimplementedCall(&context, request, &response);
 
-  if (!AssertStatusCode(s, StatusCode::UNIMPLEMENTED)) {
+  if (!AssertStatusCode(s, StatusCode::UNIMPLEMENTED,
+                        context.debug_error_string())) {
     return false;
   }
 
@@ -1036,7 +1056,8 @@ bool InteropClient::DoUnimplementedMethod() {
   Status s =
       serviceStub_.Get()->UnimplementedCall(&context, request, &response);
 
-  if (!AssertStatusCode(s, StatusCode::UNIMPLEMENTED)) {
+  if (!AssertStatusCode(s, StatusCode::UNIMPLEMENTED,
+                        context.debug_error_string())) {
     return false;
   }
 

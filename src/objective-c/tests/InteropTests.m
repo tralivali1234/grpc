@@ -1,33 +1,18 @@
 /*
  *
- * Copyright 2015, Google Inc.
- * All rights reserved.
+ * Copyright 2015 gRPC authors.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *     * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
- *     * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -38,6 +23,7 @@
 #import <Cronet/Cronet.h>
 #import <GRPCClient/GRPCCall+ChannelArg.h>
 #import <GRPCClient/GRPCCall+Tests.h>
+#import <GRPCClient/internal_testing/GRPCCall+InternalTests.h>
 #import <GRPCClient/GRPCCall+Cronet.h>
 #import <ProtoRPC/ProtoRPC.h>
 #import <RemoteTest/Messages.pbobjc.h>
@@ -45,6 +31,8 @@
 #import <RemoteTest/Test.pbrpc.h>
 #import <RxLibrary/GRXBufferedPipe.h>
 #import <RxLibrary/GRXWriter+Immediate.h>
+#import <grpc/support/log.h>
+#import <grpc/grpc.h>
 
 #define TEST_TIMEOUT 32
 
@@ -80,6 +68,10 @@
 }
 @end
 
+BOOL isRemoteInteropTest(NSString *host) {
+  return [host isEqualToString:@"grpc-test.sandbox.googleapis.com"];
+}
+
 #pragma mark Tests
 
 @implementation InteropTests {
@@ -90,11 +82,15 @@
   return nil;
 }
 
+// This number indicates how many bytes of overhead does Protocol Buffers encoding add onto the
+// message. The number varies as different message.proto is used on different servers. The actual
+// number for each interop server is overridden in corresponding derived test classes.
 - (int32_t)encodingOverhead {
   return 0;
 }
 
 + (void)setUp {
+  NSLog(@"InteropTest Started, class: %@", [[self class] description]);
 #ifdef GRPC_COMPILE_WITH_CRONET
   // Cronet setup
   [Cronet setHttp2Enabled:YES];
@@ -150,6 +146,44 @@
   }];
 
   [self waitForExpectationsWithTimeout:TEST_TIMEOUT handler:nil];
+}
+
+- (void)testPacketCoalescing {
+  XCTAssertNotNil(self.class.host);
+  __weak XCTestExpectation *expectation = [self expectationWithDescription:@"LargeUnary"];
+
+  RMTSimpleRequest *request = [RMTSimpleRequest message];
+  request.responseType = RMTPayloadType_Compressable;
+  request.responseSize = 10;
+  request.payload.body = [NSMutableData dataWithLength:10];
+
+  [GRPCCall enableOpBatchLog:YES];
+  [_service unaryCallWithRequest:request handler:^(RMTSimpleResponse *response, NSError *error) {
+    XCTAssertNil(error, @"Finished with unexpected error: %@", error);
+
+    RMTSimpleResponse *expectedResponse = [RMTSimpleResponse message];
+    expectedResponse.payload.type = RMTPayloadType_Compressable;
+    expectedResponse.payload.body = [NSMutableData dataWithLength:10];
+    XCTAssertEqualObjects(response, expectedResponse);
+
+    // The test is a success if there is a batch of exactly 3 ops (SEND_INITIAL_METADATA,
+    // SEND_MESSAGE, SEND_CLOSE_FROM_CLIENT). Without packet coalescing each batch of ops contains
+    // only one op.
+    NSArray *opBatches = [GRPCCall obtainAndCleanOpBatchLog];
+    const NSInteger kExpectedOpBatchSize = 3;
+    for (NSObject *o in opBatches) {
+      if ([o isKindOfClass:[NSArray class]]) {
+        NSArray *batch = (NSArray *)o;
+        if ([batch count] == kExpectedOpBatchSize) {
+          [expectation fulfill];
+          break;
+        }
+      }
+    }
+  }];
+
+  [self waitForExpectationsWithTimeout:16 handler:nil];
+  [GRPCCall enableOpBatchLog:NO];
 }
 
 - (void)test4MBResponsesAreAccepted {
@@ -324,8 +358,6 @@
   [self waitForExpectationsWithTimeout:TEST_TIMEOUT handler:nil];
 }
 
-#ifndef GRPC_COMPILE_WITH_CRONET
-// TODO(makdharma@): Fix this test
 - (void)testEmptyStreamRPC {
   XCTAssertNotNil(self.class.host);
   __weak XCTestExpectation *expectation = [self expectationWithDescription:@"EmptyStream"];
@@ -339,7 +371,6 @@
   }];
   [self waitForExpectationsWithTimeout:TEST_TIMEOUT handler:nil];
 }
-#endif
 
 - (void)testCancelAfterBeginRPC {
   XCTAssertNotNil(self.class.host);
@@ -424,5 +455,77 @@
 
   [self waitForExpectationsWithTimeout:TEST_TIMEOUT handler:nil];
 }
+
+- (void)testCompressedUnaryRPC {
+  // This test needs to be disabled for remote test because interop server grpc-test
+  // does not support compression.
+  if (isRemoteInteropTest(self.class.host)) {
+    return;
+  }
+  XCTAssertNotNil(self.class.host);
+  __weak XCTestExpectation *expectation = [self expectationWithDescription:@"LargeUnary"];
+
+  RMTSimpleRequest *request = [RMTSimpleRequest message];
+  request.responseType = RMTPayloadType_Compressable;
+  request.responseSize = 314159;
+  request.payload.body = [NSMutableData dataWithLength:271828];
+  request.expectCompressed.value = YES;
+  [GRPCCall setDefaultCompressMethod:GRPCCompressGzip forhost:self.class.host];
+
+  [_service unaryCallWithRequest:request handler:^(RMTSimpleResponse *response, NSError *error) {
+    XCTAssertNil(error, @"Finished with unexpected error: %@", error);
+
+    RMTSimpleResponse *expectedResponse = [RMTSimpleResponse message];
+    expectedResponse.payload.type = RMTPayloadType_Compressable;
+    expectedResponse.payload.body = [NSMutableData dataWithLength:314159];
+    XCTAssertEqualObjects(response, expectedResponse);
+
+    [expectation fulfill];
+  }];
+
+  [self waitForExpectationsWithTimeout:TEST_TIMEOUT handler:nil];
+}
+
+#ifndef GRPC_COMPILE_WITH_CRONET
+- (void)testKeepalive {
+  XCTAssertNotNil(self.class.host);
+  __weak XCTestExpectation *expectation = [self expectationWithDescription:@"Keepalive"];
+
+  [GRPCCall setKeepaliveWithInterval:1500 timeout:0 forHost:self.class.host];
+
+  NSArray *requests = @[@27182, @8];
+  NSArray *responses = @[@31415, @9];
+
+  GRXBufferedPipe *requestsBuffer = [[GRXBufferedPipe alloc] init];
+
+  __block int index = 0;
+
+  id request = [RMTStreamingOutputCallRequest messageWithPayloadSize:requests[index]
+                                               requestedResponseSize:responses[index]];
+  [requestsBuffer writeValue:request];
+
+  [_service fullDuplexCallWithRequestsWriter:requestsBuffer
+                                eventHandler:^(BOOL done,
+                                               RMTStreamingOutputCallResponse *response,
+                                               NSError *error) {
+    if (index == 0) {
+      XCTAssertNil(error, @"Finished with unexpected error: %@", error);
+      XCTAssertTrue(response, @"Event handler called without an event.");
+      XCTAssertFalse(done);
+      index++;
+    } else {
+      // Keepalive should kick after 1s elapsed and fails the call.
+      XCTAssertNotNil(error);
+      XCTAssertEqual(error.code, GRPC_STATUS_INTERNAL);
+      XCTAssertEqualObjects(error.localizedDescription, @"keepalive watchdog timeout",
+                            @"Unexpected failure that is not keepalive watchdog timeout.");
+      XCTAssertTrue(done);
+      [expectation fulfill];
+    }
+  }];
+
+  [self waitForExpectationsWithTimeout:TEST_TIMEOUT handler:nil];
+}
+#endif
 
 @end

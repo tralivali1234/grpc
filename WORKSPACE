@@ -1,47 +1,5 @@
-bind(
-    name = "nanopb",
-    actual = "//third_party/nanopb",
-)
+workspace(name = "com_github_grpc_grpc")
 
-bind(
-    name = "libssl",
-    actual = "@submodule_boringssl//:ssl",
-)
-
-bind(
-    name = "zlib",
-    actual = "@submodule_zlib//:z",
-)
-
-bind(
-    name = "protobuf",
-    actual = "@submodule_protobuf//:protobuf",
-)
-
-bind(
-    name = "protobuf_clib",
-    actual = "@submodule_protobuf//:protoc_lib",
-)
-
-bind(
-    name = "protocol_compiler",
-    actual = "@submodule_protobuf//:protoc",
-)
-
-new_local_repository(
-    name = "submodule_boringssl",
-    path = "third_party/boringssl-with-bazel",
-    build_file = "third_party/boringssl-with-bazel/BUILD",
-)
-
-new_local_repository(
-    name = "submodule_zlib",
-    path = "third_party/zlib",
-    build_file = "third_party/zlib.BUILD",
-)
-
-new_local_repository(
-    name = "submodule_protobuf",
-    path = "third_party/protobuf",
-    build_file = "third_party/protobuf/BUILD",
-)
+load("//bazel:grpc_deps.bzl", "grpc_deps", "grpc_test_only_deps")
+grpc_deps()
+grpc_test_only_deps()

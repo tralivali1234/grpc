@@ -1,37 +1,20 @@
 /*
  *
- * Copyright 2015-2016, Google Inc.
- * All rights reserved.
+ * Copyright 2015-2016 gRPC authors.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *     * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
- *     * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  *
  */
-
-#include <unistd.h>
 
 #include <fstream>
 #include <memory>
@@ -39,18 +22,18 @@
 #include <thread>
 
 #include <gflags/gflags.h>
-#include <grpc++/security/server_credentials.h>
-#include <grpc++/server.h>
-#include <grpc++/server_builder.h>
-#include <grpc++/server_context.h>
 #include <grpc/grpc.h>
 #include <grpc/support/log.h>
-#include <grpc/support/useful.h>
+#include <grpc/support/time.h>
+#include <grpcpp/security/server_credentials.h>
+#include <grpcpp/server.h>
+#include <grpcpp/server_builder.h>
+#include <grpcpp/server_context.h>
 
-#include "src/core/lib/support/string.h"
+#include "src/core/lib/gpr/string.h"
 #include "src/core/lib/transport/byte_stream.h"
-#include "src/proto/grpc/testing/empty.grpc.pb.h"
-#include "src/proto/grpc/testing/messages.grpc.pb.h"
+#include "src/proto/grpc/testing/empty.pb.h"
+#include "src/proto/grpc/testing/messages.pb.h"
 #include "src/proto/grpc/testing/test.grpc.pb.h"
 #include "test/cpp/interop/server_helper.h"
 #include "test/cpp/util/test_config.h"
@@ -67,8 +50,9 @@ using grpc::ServerCredentials;
 using grpc::ServerReader;
 using grpc::ServerReaderWriter;
 using grpc::ServerWriter;
-using grpc::WriteOptions;
 using grpc::SslServerCredentialsOptions;
+using grpc::Status;
+using grpc::WriteOptions;
 using grpc::testing::InteropServerContextInspector;
 using grpc::testing::Payload;
 using grpc::testing::SimpleRequest;
@@ -78,7 +62,6 @@ using grpc::testing::StreamingInputCallResponse;
 using grpc::testing::StreamingOutputCallRequest;
 using grpc::testing::StreamingOutputCallResponse;
 using grpc::testing::TestService;
-using grpc::Status;
 
 const char kEchoInitialMetadataKey[] = "x-grpc-test-echo-initial";
 const char kEchoTrailingBinMetadataKey[] = "x-grpc-test-echo-trailing-bin";
@@ -91,7 +74,9 @@ void MaybeEchoMetadata(ServerContext* context) {
 
   auto iter = client_metadata.find(kEchoInitialMetadataKey);
   if (iter != client_metadata.end()) {
-    context->AddInitialMetadata(kEchoInitialMetadataKey, iter->second.data());
+    context->AddInitialMetadata(
+        kEchoInitialMetadataKey,
+        grpc::string(iter->second.begin(), iter->second.end()));
   }
   iter = client_metadata.find(kEchoTrailingBinMetadataKey);
   if (iter != client_metadata.end()) {
@@ -105,7 +90,9 @@ void MaybeEchoMetadata(ServerContext* context) {
   if (iter != client_metadata.end()) {
     iter = client_metadata.find("user-agent");
     if (iter != client_metadata.end()) {
-      context->AddInitialMetadata(kEchoUserAgentKey, iter->second.data());
+      context->AddInitialMetadata(
+          kEchoUserAgentKey,
+          grpc::string(iter->second.begin(), iter->second.end()));
     }
   }
 }
@@ -329,9 +316,15 @@ class TestServiceImpl : public TestService::Service {
 
 void grpc::testing::interop::RunServer(
     std::shared_ptr<ServerCredentials> creds) {
-  GPR_ASSERT(FLAGS_port != 0);
+  RunServer(creds, FLAGS_port, nullptr);
+}
+
+void grpc::testing::interop::RunServer(
+    std::shared_ptr<ServerCredentials> creds, const int port,
+    ServerStartedCondition* server_started_condition) {
+  GPR_ASSERT(port != 0);
   std::ostringstream server_address;
-  server_address << "0.0.0.0:" << FLAGS_port;
+  server_address << "0.0.0.0:" << port;
   TestServiceImpl service;
 
   SimpleRequest request;
@@ -345,7 +338,16 @@ void grpc::testing::interop::RunServer(
   }
   std::unique_ptr<Server> server(builder.BuildAndStart());
   gpr_log(GPR_INFO, "Server listening on %s", server_address.str().c_str());
+
+  // Signal that the server has started.
+  if (server_started_condition) {
+    std::unique_lock<std::mutex> lock(server_started_condition->mutex);
+    server_started_condition->server_started = true;
+    server_started_condition->condition.notify_all();
+  }
+
   while (!gpr_atm_no_barrier_load(&g_got_sigint)) {
-    sleep(5);
+    gpr_sleep_until(gpr_time_add(gpr_now(GPR_CLOCK_REALTIME),
+                                 gpr_time_from_seconds(5, GPR_TIMESPAN)));
   }
 }

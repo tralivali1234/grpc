@@ -335,8 +335,8 @@ namespace Grpc.Testing {
   }
 
   /// <summary>
-  ///  TODO (vpai): Fill this in once the details of complex, representative
-  ///               protos are decided
+  /// TODO (vpai): Fill this in once the details of complex, representative
+  ///              protos are decided
   /// </summary>
   public sealed partial class ComplexProtoParams : pb::IMessage<ComplexProtoParams> {
     private static readonly pb::MessageParser<ComplexProtoParams> _parser = new pb::MessageParser<ComplexProtoParams>(() => new ComplexProtoParams());
@@ -596,13 +596,22 @@ namespace Grpc.Testing {
       }
       switch (other.PayloadCase) {
         case PayloadOneofCase.BytebufParams:
-          BytebufParams = other.BytebufParams;
+          if (BytebufParams == null) {
+            BytebufParams = new global::Grpc.Testing.ByteBufferParams();
+          }
+          BytebufParams.MergeFrom(other.BytebufParams);
           break;
         case PayloadOneofCase.SimpleParams:
-          SimpleParams = other.SimpleParams;
+          if (SimpleParams == null) {
+            SimpleParams = new global::Grpc.Testing.SimpleProtoParams();
+          }
+          SimpleParams.MergeFrom(other.SimpleParams);
           break;
         case PayloadOneofCase.ComplexParams:
-          ComplexParams = other.ComplexParams;
+          if (ComplexParams == null) {
+            ComplexParams = new global::Grpc.Testing.ComplexProtoParams();
+          }
+          ComplexParams.MergeFrom(other.ComplexParams);
           break;
       }
 

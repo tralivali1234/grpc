@@ -1,34 +1,19 @@
 <?php
 /*
  *
- * Copyright 2015, Google Inc.
- * All rights reserved.
+ * Copyright 2015 gRPC authors.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *     * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
- *     * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -69,15 +54,24 @@ class BaseStub
             }
             unset($opts['update_metadata']);
         }
+        if (!empty($opts['grpc.ssl_target_name_override'])) {
+            $this->hostname_override = $opts['grpc.ssl_target_name_override'];
+        }
+        if ($channel) {
+            if (!is_a($channel, 'Grpc\Channel')) {
+                throw new \Exception('The channel argument is not a'.
+                                     'Channel object');
+            }
+            $this->channel = $channel;
+            return;
+        }
+
         $package_config = json_decode(
             file_get_contents(dirname(__FILE__).'/../../composer.json'), true);
         if (!empty($opts['grpc.primary_user_agent'])) {
             $opts['grpc.primary_user_agent'] .= ' ';
         } else {
             $opts['grpc.primary_user_agent'] = '';
-        }
-        if (!empty($opts['grpc.ssl_target_name_override'])) {
-            $this->hostname_override = $opts['grpc.ssl_target_name_override'];
         }
         $opts['grpc.primary_user_agent'] .=
             'grpc-php/'.$package_config['version'];
@@ -86,15 +80,7 @@ class BaseStub
                                  'required. Please see one of the '.
                                  'ChannelCredentials::create methods');
         }
-        if ($channel) {
-            if (!is_a($channel, 'Channel')) {
-                throw new \Exception('The channel argument is not a'.
-                                     'Channel object');
-            }
-            $this->channel = $channel;
-        } else {
-            $this->channel = new Channel($hostname, $opts);
-        }
+        $this->channel = new Channel($hostname, $opts);
     }
 
     /**
@@ -146,6 +132,14 @@ class BaseStub
     }
 
     /**
+     * Close the communication channel associated with this stub.
+     */
+    public function close()
+    {
+        $this->channel->close();
+    }
+
+    /**
      * @param $new_state Connect state
      *
      * @return bool true if state is CHANNEL_READY
@@ -161,14 +155,6 @@ class BaseStub
         }
 
         return false;
-    }
-
-    /**
-     * Close the communication channel associated with this stub.
-     */
-    public function close()
-    {
-        $this->channel->close();
     }
 
     /**
@@ -233,9 +219,9 @@ class BaseStub
      *                              (optional)
      * @param array    $options     An array of options (optional)
      *
-     * @return SimpleSurfaceActiveCall The active call object
+     * @return UnaryCall The active call object
      */
-    public function _simpleRequest($method,
+    protected function _simpleRequest($method,
                                    $argument,
                                    $deserialize,
                                    array $metadata = [],
@@ -268,10 +254,10 @@ class BaseStub
      *                              (optional)
      * @param array    $options     An array of options (optional)
      *
-     * @return ClientStreamingSurfaceActiveCall The active call object
+     * @return ClientStreamingCall The active call object
      */
-    public function _clientStreamRequest($method,
-                                         callable $deserialize,
+    protected function _clientStreamRequest($method,
+                                         $deserialize,
                                          array $metadata = [],
                                          array $options = [])
     {
@@ -303,11 +289,11 @@ class BaseStub
      *                              (optional)
      * @param array    $options     An array of options (optional)
      *
-     * @return ServerStreamingSurfaceActiveCall The active call object
+     * @return ServerStreamingCall The active call object
      */
-    public function _serverStreamRequest($method,
+    protected function _serverStreamRequest($method,
                                          $argument,
-                                         callable $deserialize,
+                                         $deserialize,
                                          array $metadata = [],
                                          array $options = [])
     {
@@ -337,10 +323,10 @@ class BaseStub
      *                              (optional)
      * @param array    $options     An array of options (optional)
      *
-     * @return BidiStreamingSurfaceActiveCall The active call object
+     * @return BidiStreamingCall The active call object
      */
-    public function _bidiRequest($method,
-                                 callable $deserialize,
+    protected function _bidiRequest($method,
+                                 $deserialize,
                                  array $metadata = [],
                                  array $options = [])
     {
